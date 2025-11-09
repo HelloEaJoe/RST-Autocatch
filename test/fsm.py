@@ -22,9 +22,6 @@ from packaged_part.camera_gimbal_control.LED import green_blink, red_blink, blue
 # 导入球检测模块
 from balltest import yolov5_lite
 
-# 导入深度读取模块
-from gx_provincial.parameter.read_depth import read_depth_continual
-
 class State(Enum):
     """定义机器人的所有可能状态"""
     DIVE = auto()               # 1. 下潜
@@ -36,15 +33,12 @@ class State(Enum):
     OPEN_CLAW_RELEASE = auto()  # 7. 开爪释放
     WAIT_RELEASE = auto()       # 8. 等待球飘走
     MOVE_AWAY = auto()          # 9. 移开
-    OPEN_CLAW_RETRY = auto()    # 10. 抓空了，开爪重试
-    STOP = auto()               # 11. 停止
+    STOP = auto()               # 10. 停止
 
 class RobotStateMachine:
     """阻塞式状态机模块。"""
-    def __init__(self, work_depth=1.2, release_depth=0.9):
+    def __init__(self):
         self.current_state = State.DIVE
-        self.WORK_DEPTH = work_depth
-        self.RELEASE_DEPTH = release_depth
         # 初始化MAVLink连接
         print("使用已有的MAVLink连接...")
         self.master = master
@@ -98,10 +92,7 @@ class RobotStateMachine:
         self.target_lost_count = 0  # 目标丢失计数
         self.TARGET_LOST_THRESHOLD = 5  # 连续丢失5帧认为丢失
         self.detected_boxes = []  # 存储检测到的所有球
-        # 深度相关
-        self.current_depth = 0.0
         print(f"状态机已初始化，起始状态: {self.current_state.name}")
-        print(f"工作深度: {self.WORK_DEPTH}米, 计分深度: {self.RELEASE_DEPTH}米")
         print("当前使用的推理后端:", "OpenVINO" if self.ball_detector.use_openvino else "ONNXRuntime")
 
     def run(self):
@@ -135,9 +126,6 @@ class RobotStateMachine:
                 elif self.current_state == State.MOVE_AWAY:
                     print(f"进入[{self.current_state.name}]状态")
                     self.current_state = self._state_move_away()
-                elif self.current_state == State.OPEN_CLAW_RETRY:
-                    print(f"进入[{self.current_state.name}]状态")
-                    self.current_state = self._state_open_claw_retry()
         except KeyboardInterrupt:
             print("\n检测到手动停止 (Ctrl+C)...")
             self.current_state = State.STOP
@@ -163,7 +151,7 @@ class RobotStateMachine:
         """1. 下潜状态 (阻塞)"""
         print("任务：下潜至工作深度")
         pwm_held = False  # 添加标志位，表示是否保持当前 PWM 值
-        while self._get_current_depth() < self.WORK_DEPTH:
+        while True:
             self._do_sink()
             pwm_held = True
         if pwm_held:
@@ -213,7 +201,7 @@ class RobotStateMachine:
             # 3. 检查是否已到位
             if self._should_grab():
                 print("完成: 到达抓取位置。")
-                # self._do_hover() # 不再悬停，直接抓取
+                self._do_sink(pwm1=1420)  # 替换 _do_maintain_sink 的调用
                 return State.GRAB        
             # 4. 执行PID控制
             self._do_approach_pid()
@@ -221,15 +209,11 @@ class RobotStateMachine:
     def _state_grab(self):
         """5. 抓球 (阻塞)"""
         print("任务: 合爪并确认是否抓到")
-        self._do_maintain_sink() # 抓取前稳定一下姿态，并保持下沉
+        self._do_sink(pwm1=1420) # 抓取前稳定一下姿态，并保持下沉
         self._do_close_claw()
-        
-        if self._has_ball():
-            print("完成: 确认抓到球。")
-            return State.ASCEND_FOR_SCORE
-        else:
-            print("异常: 抓空了。")
-            return State.OPEN_CLAW_RETRY
+
+        print("完成: 确认抓到球。")
+        return State.ASCEND_FOR_SCORE
 
     def _state_ascend_for_score(self):
         """6. 上浮计分 (阻塞)"""
@@ -258,46 +242,16 @@ class RobotStateMachine:
         print("完成: 已移开。")
         return State.DIVE
 
-    def _state_open_claw_retry(self):
-        """10. 抓空开爪 (阻塞)"""
-        print("任务: (抓空) 开爪准备下次")
-        self._do_open_claw()
-        print("完成: 已开爪。")
-        return State.FIND_BALL
-
 # 以下为状态机辅助函数实现
-    def _get_current_depth(self) -> float:
-        """从read_depth.py获取当前深度（通过AHRS2消息）"""
-        try:
-            depth_cm = read_depth_continual(self.current_depth)
-            if depth_cm is not None:
-                self.current_depth = depth_cm / 100.0
-                print(f"当前深度: {self.current_depth:.2f}米 ({depth_cm:.1f}厘米)")
-                return self.current_depth
-            else:
-                print("警告: 无法从AHRS2获取深度数据，使用上一次的值")
-                return self.current_depth
-        except Exception as e:
-            print(f"获取深度数据错误: {e}")
-            return self.current_depth
-
-    def _do_sink(self):
-        """执行下潜动作"""
-        pwm1 = 1380  # 下潜
-        pwm2 = 1500  # 保持航向
-        pwm3 = 1500  # 不前进
-        aim(pwm1, pwm2, pwm3)
+    def _do_sink(self, pwm1=1380):
+        """执行下潜动作，支持动态调整PWM值"""
+        aim(pwm1, 1500, 1500)  # 保持航向和不前进
         time.sleep(0.1)
 
     def _do_hover(self):
         """执行悬停"""
         static()  # 所有通道设为1500
         time.sleep(0.2)
-
-    def _do_maintain_sink(self):
-        """保持轻微下沉，用于替代部分状态的悬停"""
-        aim(1420, 1500, 1500) # 持续施加一个轻微的下沉力
-        time.sleep(0.1)
 
     # 只展示关键修改部分，其他代码保持不变
     def _select_ball(self) -> bool:
@@ -334,13 +288,18 @@ class RobotStateMachine:
                 int(self.ball_detector.input_shape[1] / self.ball_detector.stride[i])
             length = int(self.ball_detector.na * h * w)
             if self.ball_detector.grid[i].shape[2:4] != (h, w):
-                self.ball_detector.grid[i] = self.ball_detector._make_grid(w, h)
+                # 修复 grid 类型问题，确保类型和形状匹配
+                # 调整 grid 的赋值为一维数组，确保类型匹配
+                self.ball_detector.grid[i] = self.ball_detector._make_grid(w, h).reshape(-1).astype(np.float64)
 
             outs[row_ind:row_ind + length, 0:2] = (outs[row_ind:row_ind + length, 0:2] * 2. - 0.5 + np.tile(
                 self.ball_detector.grid[i], (self.ball_detector.na, 1))) * int(self.ball_detector.stride[i])
             outs[row_ind:row_ind + length, 2:4] = (outs[row_ind:row_ind + length, 2:4] * 2) ** 2 * np.repeat(
                 self.ball_detector.anchor_grid[i], h * w, axis=0)
             row_ind += length
+
+        # 修复 grid 初始化，确保与 balltest.py 一致
+        self.ball_detector.grid = [np.zeros(1)] * self.ball_detector.nl
 
         # 后续可视化和目标选择逻辑不变...
         frameHeight, frameWidth = frame.shape[:2]
@@ -455,8 +414,11 @@ class RobotStateMachine:
     def _do_approach_pid(self):
         """执行靠近PID控制"""
         if self.target_ball is None:
-            self._do_maintain_sink() # 目标丢失时，保持下沉而不是悬停
+            self._do_sink(pwm1=1380) # 目标丢失时，保持下沉而不是悬停
             return
+        
+        # 垂直方向以轻微下沉(1420)为基准进行调整
+        pwm1 = 1420
         
         center_x = 320 / 2
         center_y = 320 / 2
@@ -468,10 +430,7 @@ class RobotStateMachine:
         
         area = self.target_ball['area']
         
-        pwm3 = 1600
-        
-        # 垂直方向以轻微下沉(1420)为基准进行调整
-        pwm1 = 1420
+        pwm3 = 1600 # 保持定速向前推进
         
         aim(pwm1, pwm2, pwm3)
         time.sleep(0.05)
@@ -483,19 +442,6 @@ class RobotStateMachine:
         time.sleep(1.0)
         print("合爪完成")
     
-    def _has_ball(self) -> bool:
-        """判断是否抓到球"""
-        print("检查是否抓到球...")
-        time.sleep(0.5)
-        # 临时：随机模拟（后续需替换为实际传感器检测）
-        import random
-        has_it = random.choice([True, False])
-        if has_it:
-            green_blink()
-        else:
-            red_blink()
-        return has_it
-
     def _do_ascend(self):
         """上浮"""
         pwm1 = 1450  # 上浮
@@ -519,7 +465,7 @@ class RobotStateMachine:
     def _do_move_forward(self):
         """前进一小段"""
         print("前进一小段...")
-        pwm1 = 1500  # 保持深度
+        pwm1 = 1420  # 保持下潜
         pwm2 = 1500  # 保持航向
         pwm3 = 1580  # 前进
         aim(pwm1, pwm2, pwm3)
@@ -528,5 +474,5 @@ class RobotStateMachine:
         print("前进完成")
         
 if __name__ == "__main__":
-    robot_sm = RobotStateMachine(work_depth=0.58, release_depth=0.48)
+    robot_sm = RobotStateMachine()
     robot_sm.run()

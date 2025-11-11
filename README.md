@@ -1,6 +1,6 @@
 # RST-Autocatch 🤖
 
-本项目由 NEU-Ocean Heart Group 开发，旨在实现自主水下机器人（AUV）的自主识别与抓球任务，面向 RST（RoboSub Tournament）竞赛。
+本项目由 NEU-Ocean Heart Group 开发，旨在实现自主水下机器人（AUV）的自主识别与抓球任务，面向 RST竞赛。
 
 ---
 

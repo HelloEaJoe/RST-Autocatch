@@ -54,7 +54,7 @@ RST-Autocatch 是一个专为 AUV 设计的视觉识别与抓球系统，由 **N
 欢迎提交 Issue 和 Pull Request！  
 如有问题或建议，请随时与我们联系。
 
-📧 邮箱：`jatzau@163.com`（请替换为实际邮箱）
+📧 邮箱：`jatzau@163.com`
 
 ---
 
